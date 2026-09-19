@@ -844,6 +844,15 @@ export function parseHttpUrl(value: unknown): URL | undefined {
   }
 }
 
+/** Temporary diagnostic breadcrumb for the tab-grouping rollout, readable via `chrome.storage.local.get('dshGroupDebug')` from any extension page even after the service worker restarts. */
+function recordGroupDebug(entry: Record<string, unknown>): void {
+  try {
+    void chrome.storage.local.set({ dshGroupDebug: entry })
+  } catch {
+    // Diagnostics must never break the open-tab flow.
+  }
+}
+
 async function removeCreatedTab(tabId: number): Promise<void> {
   try {
     await chrome.tabs.remove(tabId)
@@ -871,6 +880,7 @@ export async function dispatchOpenTab(
   bindCreatedTab: (tab: chrome.tabs.Tab) => boolean,
   targetStillAllowed: (tabId: number) => boolean,
   commitAction?: () => void,
+  groupTab?: (tabId: number, windowId: number) => Promise<{ created: boolean } | undefined>,
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   const parsed = parseHttpUrl(call.args.url)
@@ -902,6 +912,35 @@ export async function dispatchOpenTab(
     return { ok: false, error: { code: 'action-failed', message: 'Chrome created a tab without an id.' } }
   }
   const tabId = created.id
+  if (isCancelled(call, signal)) {
+    await removeCreatedTab(tabId)
+    return cancelled()
+  }
+
+  let groupNote = ''
+  if (groupTab !== undefined) {
+    try {
+      const grouped = await groupTab(tabId, windowId)
+      recordGroupDebug({ at: Date.now(), tabId, windowId, result: 'grouped' })
+      if (grouped !== undefined) {
+        groupNote = grouped.created
+          ? " Created a new 'DSH' tab group for it."
+          : " Added it to the existing 'DSH' tab group."
+      }
+    } catch (error: unknown) {
+      // Grouping is cosmetic; the tab still opened and navigated successfully.
+      recordGroupDebug({
+        at: Date.now(),
+        tabId,
+        windowId,
+        result: 'error',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  } else {
+    recordGroupDebug({ at: Date.now(), tabId, windowId, result: 'no-groupTab-callback' })
+  }
+
   if (isCancelled(call, signal)) {
     await removeCreatedTab(tabId)
     return cancelled()
@@ -940,7 +979,7 @@ export async function dispatchOpenTab(
   resetTabSnapshot(tabId)
   if (!targetStillAllowed(tabId)) return targetChanged()
 
-  const status = `Opened a new tab at ${parsed.href}.`
+  const status = `Opened a new tab at ${parsed.href}.${groupNote}`
   if (!ready || sharePageContent === 'off' || isCancelled(call, signal)) {
     return {
       ok: true,

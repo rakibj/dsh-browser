@@ -797,6 +797,7 @@ describe('dispatchOpenTab', () => {
 
     const bindCreatedTab = vi.fn(() => true)
     const commitAction = vi.fn()
+    const groupTab = vi.fn(async () => ({ created: true }))
     const open = dispatchOpenTab(
       { id: 'open-1', name: 'browser_open_tab', args: { url: 'https://docs.example/' } },
       9,
@@ -807,9 +808,10 @@ describe('dispatchOpenTab', () => {
       bindCreatedTab,
       () => true,
       commitAction,
+      groupTab,
     )
     await vi.waitFor(() => { expect(runtimeListeners.size).toBe(1) })
-    expect(create).toHaveBeenCalledWith({ active: true, windowId: 9 })
+    expect(create).toHaveBeenCalledWith({ active: false, windowId: 9 })
     expect(update).toHaveBeenCalledWith(42, { url: 'https://docs.example/' })
     for (const listener of runtimeListeners) {
       listener(
@@ -833,9 +835,120 @@ describe('dispatchOpenTab', () => {
     expect(bindCreatedTab).toHaveBeenCalledOnce()
     expect(commitAction).toHaveBeenCalledOnce()
     expect(remove).not.toHaveBeenCalled()
+    expect(groupTab).toHaveBeenCalledWith(42, 9)
     expect(answer.ok).toBe(true)
     expect((answer.result as { text: string }).text).toContain('Opened a new tab')
     expect((answer.result as { text: string }).text).toContain('new page')
+    expect((answer.result as { text: string }).text).toContain("Created a new 'DSH' tab group for it.")
+  })
+
+  it("reports reusing the existing 'DSH' tab group when the tab was already grouped", async () => {
+    const { dispatchOpenTab } = await import('../src/background/tools.ts')
+    const runtimeListeners = new Set<(message: unknown, sender: chrome.runtime.MessageSender) => void>()
+    const create = vi.fn(async () => ({ id: 44, windowId: 9, url: '' }))
+    const update = vi.fn(async () => ({ id: 44, windowId: 9, url: 'https://docs.example/' }))
+    const remove = vi.fn(async () => undefined)
+    const sendMessage = vi.fn(async () => ({ ok: true, result: { text: 'new page' } }))
+    const getAllFrames = vi.fn(async () => [{
+      frameId: 0, parentFrameId: -1, documentId: 'doc-44', url: 'https://docs.example/',
+    }])
+    vi.stubGlobal('chrome', {
+      tabs: { create, update, remove, sendMessage, query: vi.fn(async () => []) },
+      scripting: { executeScript: vi.fn(async () => [{ frameId: 0, result: undefined }]) },
+      webNavigation: { getAllFrames },
+      runtime: {
+        onMessage: {
+          addListener: (listener: (message: unknown, sender: chrome.runtime.MessageSender) => void) => {
+            runtimeListeners.add(listener)
+          },
+          removeListener: (listener: (message: unknown, sender: chrome.runtime.MessageSender) => void) => {
+            runtimeListeners.delete(listener)
+          },
+        },
+      },
+    })
+
+    const bindCreatedTab = vi.fn(() => true)
+    const groupTab = vi.fn(async () => ({ created: false }))
+    const open = dispatchOpenTab(
+      { id: 'open-3', name: 'browser_open_tab', args: { url: 'https://docs.example/' } },
+      9,
+      'auto',
+      { maxItems: 60, maxChars: 12_000 },
+      async () => 'approved',
+      undefined,
+      bindCreatedTab,
+      () => true,
+      undefined,
+      groupTab,
+    )
+    await vi.waitFor(() => { expect(runtimeListeners.size).toBe(1) })
+    for (const listener of runtimeListeners) {
+      listener(
+        { type: 'DSH_CONTENT_READY' },
+        {
+          tab: { id: 44 }, frameId: 0, documentId: 'doc-44', url: 'https://docs.example/',
+        } as chrome.runtime.MessageSender,
+      )
+    }
+    const answer = await open
+    expect(answer.ok).toBe(true)
+    expect((answer.result as { text: string }).text).toContain("Added it to the existing 'DSH' tab group.")
+  })
+
+  it('does not fail browser_open_tab when grouping the new tab throws', async () => {
+    const { dispatchOpenTab } = await import('../src/background/tools.ts')
+    const runtimeListeners = new Set<(message: unknown, sender: chrome.runtime.MessageSender) => void>()
+    const create = vi.fn(async () => ({ id: 43, windowId: 9, url: '' }))
+    const update = vi.fn(async () => ({ id: 43, windowId: 9, url: 'https://docs.example/' }))
+    const remove = vi.fn(async () => undefined)
+    const sendMessage = vi.fn(async () => ({ ok: true, result: { text: 'new page' } }))
+    const getAllFrames = vi.fn(async () => [{
+      frameId: 0, parentFrameId: -1, documentId: 'doc-43', url: 'https://docs.example/',
+    }])
+    vi.stubGlobal('chrome', {
+      tabs: { create, update, remove, sendMessage, query: vi.fn(async () => []) },
+      scripting: { executeScript: vi.fn(async () => [{ frameId: 0, result: undefined }]) },
+      webNavigation: { getAllFrames },
+      runtime: {
+        onMessage: {
+          addListener: (listener: (message: unknown, sender: chrome.runtime.MessageSender) => void) => {
+            runtimeListeners.add(listener)
+          },
+          removeListener: (listener: (message: unknown, sender: chrome.runtime.MessageSender) => void) => {
+            runtimeListeners.delete(listener)
+          },
+        },
+      },
+    })
+
+    const bindCreatedTab = vi.fn(() => true)
+    const groupTab = vi.fn(async () => { throw new Error('permission revoked') })
+    const open = dispatchOpenTab(
+      { id: 'open-2', name: 'browser_open_tab', args: { url: 'https://docs.example/' } },
+      9,
+      'auto',
+      { maxItems: 60, maxChars: 12_000 },
+      async () => 'approved',
+      undefined,
+      bindCreatedTab,
+      () => true,
+      undefined,
+      groupTab,
+    )
+    await vi.waitFor(() => { expect(runtimeListeners.size).toBe(1) })
+    for (const listener of runtimeListeners) {
+      listener(
+        { type: 'DSH_CONTENT_READY' },
+        {
+          tab: { id: 43 }, frameId: 0, documentId: 'doc-43', url: 'https://docs.example/',
+        } as chrome.runtime.MessageSender,
+      )
+    }
+    const answer = await open
+    expect(groupTab).toHaveBeenCalledWith(43, 9)
+    expect(answer.ok).toBe(true)
+    expect((answer.result as { text: string }).text).not.toContain('DSH')
   })
 
   it('rejects non-http URLs before creating a tab', async () => {
