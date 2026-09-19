@@ -782,3 +782,26 @@ describe('BridgeServer', () => {
     expect(frames.filter((f) => f.t === 'event').length).toBe(countBefore)
   })
 })
+
+it('delivers task completion independently of panel subscriptions', async () => {
+  const h = await startBridge()
+  harnesses.push(h)
+  const { ws, frames } = await connect(h.url, EXT_ORIGIN)
+  send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+  await waitFor(() => frames.some(f => f.t === 'hello.ok'))
+  h.bridge.finishBrowserTask('session-a')
+  await waitFor(() => frames.some(f => f.t === 'browser.task.end'))
+  expect(frames).toContainEqual({ t: 'browser.task.end', sessionId: 'session-a' })
+  ws.close()
+})
+
+it('delivers completion after a disconnected extension reconnects', async () => {
+  const h = await startBridge()
+  harnesses.push(h)
+  h.bridge.finishBrowserTask('offline-session')
+  const { ws, frames } = await connect(h.url, EXT_ORIGIN)
+  send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+  await waitFor(() => frames.some(f => f.t === 'browser.task.end'))
+  expect(frames).toContainEqual({ t: 'browser.task.end', sessionId: 'offline-session' })
+  ws.close()
+})

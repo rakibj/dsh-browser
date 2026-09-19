@@ -40,6 +40,7 @@ function chromeEvent<T extends unknown[]>() {
   const listeners = new Set<(...args: T) => void>()
   return {
     addListener: vi.fn((listener: (...args: T) => void) => { listeners.add(listener) }),
+    removeListener: vi.fn((listener: (...args: T) => void) => { listeners.delete(listener) }),
     emit: (...args: T) => { for (const listener of listeners) listener(...args) },
   }
 }
@@ -140,45 +141,33 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
-  it('does not probe, connect, or arm keepalive just because the extension loads', async () => {
+  it('connects and arms keepalive without opening the side panel', async () => {
     const chromeMock = mockChrome()
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       wsUrl: 'ws://127.0.0.1:3080/ext/bridge',
-    }), { status: 200 }))
-    vi.stubGlobal('fetch', fetchMock)
+    }), { status: 200 })))
     vi.stubGlobal('WebSocket', FakeWebSocket)
-
     await import('../src/background/index.ts')
-    await vi.waitFor(() => { expect(chrome.storage.local.get).toHaveBeenCalled() })
-
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(FakeWebSocket.instances).toHaveLength(0)
-    expect(chromeMock.alarms.create).not.toHaveBeenCalled()
-    expect(chromeMock.alarms.clear).toHaveBeenCalledWith('bridge-keepalive')
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    expect(chromeMock.alarms.create).toHaveBeenCalledWith('bridge-keepalive', { periodInMinutes: 0.5 })
+    expect(chrome.sidePanel.open).not.toHaveBeenCalled()
   })
 
-  it('abandons an in-flight discovery when the last panel closes', async () => {
+  it('continues discovery after the last panel closes', async () => {
     const chromeMock = mockChrome()
     let finishDiscovery!: (response: Response) => void
-    const fetchMock = vi.fn(async () => await new Promise<Response>((resolve) => {
+    vi.stubGlobal('fetch', vi.fn(async () => await new Promise<Response>((resolve) => {
       finishDiscovery = resolve
-    }))
-    vi.stubGlobal('fetch', fetchMock)
+    })))
     vi.stubGlobal('WebSocket', FakeWebSocket)
     await import('../src/background/index.ts')
-    chromeMock.alarms.clear.mockClear()
-
+    await vi.waitFor(() => { expect(finishDiscovery).toBeTypeOf('function') })
     const panel = panelPort()
     chromeMock.onConnect.emit(panel.port)
-    await vi.waitFor(() => { expect(fetchMock).toHaveBeenCalledOnce() })
-    expect(chromeMock.alarms.create).toHaveBeenCalledWith('bridge-keepalive', { periodInMinutes: 0.5 })
-
     panel.onDisconnect.emit()
-    finishDiscovery(new Response(null, { status: 503 }))
-    await vi.waitFor(() => { expect(chromeMock.alarms.clear).toHaveBeenCalledWith('bridge-keepalive') })
-
-    expect(fetchMock).toHaveBeenCalledOnce()
-    expect(FakeWebSocket.instances).toHaveLength(0)
+    finishDiscovery(new Response(JSON.stringify({ wsUrl: 'ws://bridge.example/ext/bridge' }), { status: 200 }))
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    expect(chromeMock.alarms.clear).not.toHaveBeenCalled()
   })
 
   it('does not let keepalive reclaim a bridge that replaced this client', async () => {
@@ -941,4 +930,58 @@ describe('background bridge lifecycle', () => {
       method: 'bridge.injectBrowserSnapshot',
     }))
   })
+})
+
+it('opens a grouped background tab from Harness with no panel and closes it on idle', async () => {
+  const mock = mockChrome({
+    localGet: async () => ({ dshSettings: {
+      bridgeUrl: 'wss://bridge.example/ext/bridge', unrestrictedBrowserAccess: true,
+    } }),
+    tabSendMessage: async () => ({ ok: true, result: { text: 'Page' } }),
+  })
+  const tab = { id: 42, windowId: 1, active: false, url: 'https://example.com/' } as chrome.tabs.Tab
+  chrome.windows.getLastFocused = vi.fn(async () => ({ id: 1 } as chrome.windows.Window))
+  chrome.tabs.create = vi.fn(async () => tab)
+  chrome.tabs.update = vi.fn(async () => {
+    const event = chrome.runtime.onMessage as unknown as ReturnType<typeof chromeEvent<[unknown, chrome.runtime.MessageSender, (response: unknown) => void]>>
+    event.emit({ type: 'DSH_CONTENT_READY' }, { tab, frameId: 0, url: tab.url }, () => {})
+    return tab
+  }) as typeof chrome.tabs.update
+  chrome.tabs.group = vi.fn(async () => 501)
+  Object.assign(chrome, { tabGroups: { update: vi.fn(async () => {}), get: vi.fn(async () => ({ id: 501 })) } })
+  vi.stubGlobal('WebSocket', FakeWebSocket)
+  await import('../src/background/index.ts')
+  await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+  const socket = FakeWebSocket.instances[0]!
+  socket.open()
+  await Promise.resolve()
+  socket.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+  await Promise.resolve()
+  socket.receive({ t: 'tool.call', id: 'open-background', sessionId: 'web-chat', name: 'browser_open_tab', args: { url: tab.url }, expiresAt: Date.now() + 10000 })
+  await vi.waitFor(() => {
+    expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'open-background', ok: true }))
+  })
+  expect(chrome.tabs.create).toHaveBeenCalledWith({ active: false, windowId: 1 })
+  expect(chrome.tabs.group).toHaveBeenCalledWith({ tabIds: [42], createProperties: { windowId: 1 } })
+  socket.receive({ t: 'browser.task.end', sessionId: 'another-chat' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(mock.tabs.remove).not.toHaveBeenCalled()
+  socket.receive({ t: 'browser.task.end', sessionId: 'web-chat' })
+  await vi.waitFor(() => { expect(mock.tabs.remove).toHaveBeenCalledExactlyOnceWith(42) })
+  expect(chrome.sidePanel.open).not.toHaveBeenCalled()
+})
+
+it('reconnects after transport loss with the panel closed', async () => {
+  mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }) })
+  vi.stubGlobal('WebSocket', FakeWebSocket)
+  await import('../src/background/index.ts')
+  await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+  const socket = FakeWebSocket.instances[0]!
+  socket.open()
+  await Promise.resolve()
+  socket.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+  await Promise.resolve()
+  socket.close()
+  await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) }, { timeout: 2000 })
+  expect(chrome.sidePanel.open).not.toHaveBeenCalled()
 })

@@ -69,6 +69,7 @@ export class BridgeClient {
     this.running = true
     this.attempt = 0
     this.generation += 1
+    this.emitState('connecting')
     void this.loop(this.generation)
   }
 

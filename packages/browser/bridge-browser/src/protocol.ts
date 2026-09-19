@@ -100,6 +100,8 @@ export type ServerFrame =
   | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
   | { t: 'tool.cancel'; id: string }
+  /** The owning agent is idle; release its temporary browser tabs. */
+  | { t: 'browser.task.end'; sessionId: string }
   /** Liveness probe. */
   | { t: 'ping' }
   /** Fatal connection error; the client should re-authenticate. */
@@ -122,6 +124,7 @@ export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
     || frame.t === 'event'
     || frame.t === 'tool.call'
     || frame.t === 'tool.cancel'
+    || frame.t === 'browser.task.end'
     || frame.t === 'ping'
     || frame.t === 'error'
 }
@@ -213,6 +216,10 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
             expiresAt: frame.expiresAt,
             ...(typeof frame.sessionId === 'string' ? { sessionId: frame.sessionId } : {}),
           }
+        : undefined
+    case 'browser.task.end':
+      return typeof frame.sessionId === 'string' && frame.sessionId.trim() !== ''
+        ? { t: 'browser.task.end', sessionId: frame.sessionId }
         : undefined
     case 'tool.cancel':
       return typeof frame.id === 'string' ? { t: 'tool.cancel', id: frame.id } : undefined

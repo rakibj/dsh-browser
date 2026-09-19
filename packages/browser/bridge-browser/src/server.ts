@@ -155,8 +155,18 @@ export class BridgeServer {
   private readonly pendingTools = new Map<string, PendingTool>()
   private readonly orderedSessionRpcs = new Map<string, Promise<void>>()
   private closed = false
+  private readonly completedWhileDisconnected = new Set<string>()
 
   constructor(private readonly deps: BridgeServerDeps) {}
+
+  /** Notify the extension when a browser-owning agent becomes idle. */
+  finishBrowserTask(sessionId: string): void {
+    if (this.current !== null && this.current.ws.readyState === WebSocket.OPEN) {
+      sendFrame(this.current.ws, { t: 'browser.task.end', sessionId })
+    } else {
+      this.completedWhileDisconnected.add(sessionId)
+    }
+  }
 
   /**
    * Handle one HTTP upgrade for the bridge path.
@@ -350,6 +360,10 @@ export class BridgeServer {
     })()
     this.current = { ws, remoteAddress, abort, pump, ping }
     sendFrame(ws, { t: 'hello.ok', caps: this.deps.caps })
+    for (const sessionId of this.completedWhileDisconnected) {
+      sendFrame(ws, { t: 'browser.task.end', sessionId })
+    }
+    this.completedWhileDisconnected.clear()
     ws.once('close', () => {
       clearInterval(ping)
       abort.abort()
@@ -369,6 +383,7 @@ export class BridgeServer {
         break
       case 'pong':
       case 'hello':
+      case 'browser.task.end':
       case 'hello.ok':
       case 'rpc.result':
       case 'respond.result':

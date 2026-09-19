@@ -151,3 +151,11 @@ function clientShape(t: 'hello' | 'rpc' | 'respond' | 'tool.result' | 'pong'): R
     case 'pong': return { t }
   }
 }
+
+it('accepts session cleanup only as a server frame with a nonempty session id', () => {
+  const frame = parseBridgeFrame(JSON.stringify({ t: 'browser.task.end', sessionId: 's1' }))
+  expect(frame).toEqual({ t: 'browser.task.end', sessionId: 's1' })
+  expect(isServerFrame(frame!)).toBe(true)
+  expect(isClientFrame(frame!)).toBe(false)
+  expect(parseBridgeFrame(JSON.stringify({ t: 'browser.task.end', sessionId: '' }))).toBeUndefined()
+})

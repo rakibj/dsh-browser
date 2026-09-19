@@ -2,9 +2,8 @@
  * Background service worker entry: owns the bridge connection, the gateway
  * RPC client, controlled-tab tool dispatch, and the panel port service.
  *
- * MV3 survival: after the user opens the panel, its port plus a half-minute
- * `alarms` keepalive re-arm the reconnect loop. Merely loading the extension
- * never probes or claims the single-connection bridge.
+ * Startup and keepalive reconnect independently of the side panel.
+ * Browser actions retain their existing approval requirements.
  *
  * Panel port protocol (chrome.runtime.connect, name "dsh-panel"):
  *   panel → bg: { type: 'rpc', id, method, payload }
@@ -59,6 +58,7 @@ import {
 } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
 import { InteractionResponseRouter } from './responses.ts'
+import { DshTabGroupManager } from './tab-group.ts'
 import {
   actionCoveredByTrustedOrigins,
   normalizeTrustedOrigin,
@@ -170,11 +170,15 @@ let bridge: BridgeClient | null = null
 let rpc: ReturnType<typeof createRpc> | null = null
 const panelPorts = new Set<chrome.runtime.Port>()
 const BRIDGE_KEEPALIVE_ALARM = 'bridge-keepalive'
-/** Invalidates an asynchronous discovery attempt when its panel lease ends. */
+/** Invalidates discovery when newer connection settings start another attempt. */
 let bridgeStartRevision = 0
 const interactionResponses = new InteractionResponseRouter()
 const transientEvents = new TransientEventCache()
 const tabAffinity = new TabAffinityController()
+const tabGroups = new DshTabGroupManager({
+  read: async () => (await chrome.storage.session.get('dshTaskTabs')).dshTaskTabs,
+  write: async (value) => { await chrome.storage.session.set({ dshTaskTabs: value }) },
+})
 const focusedWindow = new FocusedWindowTracker()
 const selections = new SelectionTracker()
 const pageSessionContexts = new PageSessionContextTracker({
@@ -188,6 +192,7 @@ void chrome.storage.session.remove(LEGACY_RECENT_SESSION_STORAGE_KEY).catch(() =
 const sessionTrustedActionOrigins = new Set<string>()
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 interface ActiveToolCall {
+  sessionId?: string
   controller: AbortController
   unrestrictedAccess: boolean
   committed: boolean
@@ -325,10 +330,6 @@ const settingsReady = loadSettings().then((loaded) => {
 
 function armBridgeKeepalive(): void {
   chrome.alarms.create(BRIDGE_KEEPALIVE_ALARM, { periodInMinutes: 0.5 })
-}
-
-function disarmBridgeKeepalive(): void {
-  void Promise.resolve(chrome.alarms.clear(BRIDGE_KEEPALIVE_ALARM)).catch(() => {})
 }
 
 function broadcastStatus(): void {
@@ -857,8 +858,8 @@ function bindOpenedTab(tab: chrome.tabs.Tab, sessionId?: string): boolean {
   const summary = summarizeTab(tab)
   if (summary === null) return false
   const sid = sessionId?.trim()
-  if (sid !== undefined && sid !== '') tabAffinity.rebindActive(summary, sid)
-  else tabAffinity.rebindActive(summary)
+  if (sid !== undefined && sid !== '') tabAffinity.rebindControlled(summary, sid)
+  else tabAffinity.rebindControlled(summary)
   if (sid !== undefined && sid !== '') {
     void pageSessionContexts.ready.then(() => {
       pageSessionContexts.bind(sid, { id: summary.tabId, ...summary })
@@ -1047,6 +1048,26 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
   }
 }
 
+const taskCleanups = new Map<string, Promise<void>>()
+
+function scheduleToolCall(call: ToolCall): void {
+  const cleanup = call.sessionId === undefined ? undefined : taskCleanups.get(call.sessionId)
+  if (cleanup === undefined) routeToolCall(call)
+  else void cleanup.then(() => routeToolCall(call))
+}
+
+function finishBrowserTask(sessionId: string): void {
+  const calls = [...unsettledToolCalls].filter(call => call.sessionId === sessionId)
+  for (const call of calls) if (!call.committed) call.controller.abort()
+  const cleanup = Promise.allSettled(calls.map(call => call.settled))
+    .then(() => tabGroups.finishSession(sessionId))
+    .catch(console.error)
+    .finally(() => {
+      if (taskCleanups.get(sessionId) === cleanup) taskCleanups.delete(sessionId)
+    })
+  taskCleanups.set(sessionId, cleanup)
+}
+
 /** Route one tool.call frame to the user-approved controlled tab. */
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
@@ -1055,6 +1076,7 @@ function routeToolCall(call: ToolCall): void {
   const unrestrictedAccess = unrestrictedAccessEnabled()
   let settle!: () => void
   const activeCall: ActiveToolCall = {
+    sessionId: call.sessionId,
     controller,
     unrestrictedAccess,
     committed: false,
@@ -1122,8 +1144,13 @@ function routeToolCall(call: ToolCall): void {
           (tab) => bindOpenedTab(tab, call.sessionId),
           (tabId) => tabAffinity.allowsTarget(tabId, call.sessionId),
           commitAction,
+          (tabId, tabWindowId) => tabGroups.ensureGroup(tabWindowId, tabId, call.sessionId).then(({ created }) => ({ created })),
         ))
-    : resolveToolTab(call.sessionId).then((target) => 'ok' in target
+    : resolveToolTab(call.sessionId).then(async (target) => {
+      if (!('ok' in target) && target.id !== undefined && call.sessionId !== undefined) {
+        await tabGroups.borrowTab(target.id, call.sessionId).catch(() => { /* Grouping is unavailable in some browsers. */ })
+      }
+      return 'ok' in target
       ? target
       : dispatchToolCall(
           call,
@@ -1134,7 +1161,8 @@ function routeToolCall(call: ToolCall): void {
           target,
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
           { unrestrictedAccess, commitAction, rollbackActionCommit },
-        ))
+        )
+    })
   ).then(
     async (answer) => {
       if (activeToolCalls.get(call.id) !== activeCall) return
@@ -1218,16 +1246,25 @@ function cancelAllToolCalls(): void {
 }
 
 /** (Re)start the bridge with the current settings. 零配置：地址留空时自动探测；回环连接无需 token。 */
-async function startBridge(): Promise<void> {
+let bridgeStarting: Promise<void> | undefined
+
+function startBridge(force = false): Promise<void> {
+  if (!force && bridgeStarting !== undefined) return bridgeStarting
+  const pending = startBridgeConnection().finally(() => {
+    if (bridgeStarting === pending) bridgeStarting = undefined
+  })
+  bridgeStarting = pending
+  return pending
+}
+
+async function startBridgeConnection(): Promise<void> {
   const revision = ++bridgeStartRevision
-  if (panelPorts.size === 0) return
   let url = settings.bridgeUrl
   if (url === '') {
-    url = await discoverBridge(() => revision === bridgeStartRevision && panelPorts.size > 0) ?? ''
+    url = await discoverBridge(() => revision === bridgeStartRevision) ?? ''
   }
-  // Discovery is asynchronous. A panel may have closed or a newer settings
-  // update may have started while its fetches were in flight.
-  if (revision !== bridgeStartRevision || panelPorts.size === 0) return
+  // Ignore discovery results from superseded connection settings.
+  if (revision !== bridgeStartRevision) return
   if (url === '') {
     bridge?.stop()
     bridge = null
@@ -1254,14 +1291,14 @@ async function startBridge(): Promise<void> {
         }
         broadcastStatus()
         if (state === 'stopped') refreshPanelResumeHints()
-        if (state === 'stopped' && panelPorts.size === 0) disarmBridgeKeepalive()
       },
       onFrame: (frame) => {
         if (frame.t === 'event') {
           transientEvents.ingest(frame)
           broadcastEvent(frame)
         }
-        else if (frame.t === 'tool.call') routeToolCall(frame)
+        else if (frame.t === 'tool.call') scheduleToolCall(frame)
+        else if (frame.t === 'browser.task.end') finishBrowserTask(frame.sessionId)
         else if (frame.t === 'tool.cancel') cancelToolCall(frame.id)
         else if (frame.t === 'respond.result') interactionResponses.route(frame)
         // rpc.result is settled by the rpc facade (wrapped below).
@@ -1271,7 +1308,7 @@ async function startBridge(): Promise<void> {
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
       },
-    }, probeBridge, () => panelPorts.size > 0)
+    }, probeBridge)
     bridge = client
     rpc = createRpc(client)
   }
@@ -1395,21 +1432,8 @@ chrome.runtime.onConnect.addListener((port) => {
             await persistSettings(settingsMsg.settings)
             const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
               || settings.token !== previousConnection.token
-            if (panelPorts.size > 0) {
-              if (connectionChanged) await startBridge()
-              broadcastStatus()
-            } else if (connectionChanged) {
-              // The settings write outlived its originating panel. Do not keep a
-              // healthy socket authenticated with stale connection settings: make
-              // the next explicit panel lease start from the persisted values.
-              bridgeStartRevision += 1
-              bridge?.stop()
-              bridge = null
-              rpc = null
-              caps = null
-              broadcastStatus()
-              disarmBridgeKeepalive()
-            }
+            if (connectionChanged) await startBridge(true)
+            broadcastStatus()
             if (requestId !== undefined) {
               try { port.postMessage({ type: 'settings.result', id: requestId, ok: true }) } catch { /* port closed */ }
             }
@@ -1592,11 +1616,8 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     syncSelectionWatch()
     if (panelPorts.size === 0) {
-      bridgeStartRevision += 1
-      bridge?.suspendReconnect()
       sessionTrustedActionOrigins.clear()
       approvals.notifyPending()
-      if (bridge?.state !== 'connected') disarmBridgeKeepalive()
     }
   })
 })
@@ -1636,6 +1657,7 @@ chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
 })
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  tabGroups.replaceTab(removedTabId, addedTabId)
   // The old document is gone even though Chrome transfers the tab identity.
   broadcastSelections(selections.clearTab(removedTabId))
   void pageSessionContexts.ready.then(() => {
@@ -1663,6 +1685,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  tabGroups.forgetTab(tabId)
   broadcastSelections(selections.clearTab(tabId))
   void pageSessionContexts.ready.then(() => {
     pageSessionContexts.removeTab(tabId)
@@ -1703,10 +1726,6 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== BRIDGE_KEEPALIVE_ALARM) return
-  if (panelPorts.size === 0) {
-    if (bridge === null || bridge.state !== 'connected') disarmBridgeKeepalive()
-    return
-  }
   // `stopped` is intentionally terminal until an explicit panel reopen or
   // settings save. In particular, code 4000 means another browser owns the
   // single bridge slot and the keepalive must not reclaim it.
@@ -1740,9 +1759,8 @@ if (import.meta.env.EXT_TARGET === 'firefox') {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {})
 }
 
-// Alarms survive some extension/service-worker restarts. Remove any stale
-// schedule left by an older eager-connection build; onConnect re-arms it.
-disarmBridgeKeepalive()
-
-// `settingsReady` intentionally has no bridge-start continuation: opening a
-// side panel is the first action allowed to claim the bridge connection.
+// Restore connectivity even when Harness is used outside the side panel.
+void settingsReady.then(() => {
+  armBridgeKeepalive()
+  return startBridge()
+})

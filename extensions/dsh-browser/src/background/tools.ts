@@ -898,7 +898,7 @@ export async function dispatchOpenTab(
   let created: chrome.tabs.Tab
   try {
     // No URL yet: register the readiness wait before the http(s) navigation.
-    created = await chrome.tabs.create({ active: true, windowId })
+    created = await chrome.tabs.create({ active: false, windowId })
   } catch (error: unknown) {
     return {
       ok: false,
