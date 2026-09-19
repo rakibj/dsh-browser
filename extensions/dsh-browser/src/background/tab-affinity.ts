@@ -3,13 +3,14 @@
  *
  * The controller deliberately separates Chrome event handling from the
  * affinity rules so transitions can be tested without a browser runtime.
- * A manual tab switch never silently changes the tool target: it creates a
- * handoff decision, and tool dispatch remains blocked until the user chooses.
- * `keep-always` is the one way out of that per-switch prompt: it pins the
- * controlled tab so later switches resolve straight to `background` instead of
- * asking again, and `ask-again` reverses it without disturbing the binding.
- * Pinning never widens what the tools may touch — the target is still exactly
- * the tab the user already approved — and any change of binding clears it.
+ * A manual tab switch never silently changes the tool target, but it also
+ * never blocks it: the agent keeps operating the tab it controls in the
+ * `background` while the user looks at something else, with no per-switch
+ * prompt required. `keep-always` pins the controlled tab so it also survives
+ * an explicit `follow`-then-switch-away sequence without dropping the pin,
+ * and `ask-again` reverses it without disturbing the binding. Pinning never
+ * widens what the tools may touch — the target is still exactly the tab the
+ * user already approved — and any change of binding clears it.
  *
  * @module
  */
@@ -364,7 +365,7 @@ export class TabAffinityController {
       return true
     }
     if (decision === 'keep' || decision === 'keep-always') {
-      if (currentStatus !== 'handoff' || this.active === null) return false
+      if (currentStatus !== 'background' || this.active === null) return false
       this.keptActiveTabId = this.active.tabId
       if (decision === 'keep-always') this.pinned = true
       this.revision += 1
@@ -418,10 +419,16 @@ export class TabAffinityController {
     return resolution.kind === 'target' && resolution.tab.tabId === tabId
   }
 
+  /**
+   * A manual tab switch away from the controlled tab never blocks tool
+   * dispatch: it always resolves straight to `background`, so the agent
+   * keeps operating its own tab regardless of what the user is looking at.
+   * `handoff` is reserved for a future explicit agent-initiated follow
+   * request; nothing currently produces it from a passive switch.
+   */
   private status(): TabAffinityStatus {
     if (this.controlled === null) return this.lost ? 'lost' : 'unbound'
     if (this.active?.tabId === this.controlled.tabId) return 'following'
-    if (this.active !== null && !this.pinned && this.keptActiveTabId !== this.active.tabId) return 'handoff'
     return 'background'
   }
 
