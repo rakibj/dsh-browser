@@ -80,7 +80,10 @@ function elementText(el: Element): string {
  */
 export function truncate(text: string, max: number): { text: string; truncated: number } {
   if (text.length <= max) return { text, truncated: 0 }
-  return { text: `${text.slice(0, max)}…`, truncated: text.length - max }
+  let cut = text.slice(0, max)
+  const last = cut.charCodeAt(cut.length - 1)
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1)
+  return { text: `${cut}…`, truncated: text.length - cut.length }
 }
 
 /**

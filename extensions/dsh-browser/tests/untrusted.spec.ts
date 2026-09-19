@@ -23,3 +23,14 @@ describe('wrapUntrustedContent', () => {
     expect(text).toContain('</UNTRUSTED_PAGE_CONTENT nonce="00000000-0000-0000-0000-000000000000">')
   })
 })
+
+it('repairs malformed page text and never splits an emoji at its budget', () => {
+  const malformed = String.fromCharCode(0xd83d)
+  expect(wrapUntrustedContent(malformed, 1000, 'test')).toContain(String.fromCharCode(0xfffd))
+  for (let budget = 500; budget < 510; budget++) {
+    const text = wrapUntrustedContent('🌊'.repeat(1000), budget, 'test')
+    expect(text).not.toMatch(/[\uD800-\uDFFF]/gu)
+    expect(text.length).toBeLessThanOrEqual(budget)
+    expect(text).toContain('</UNTRUSTED_PAGE_CONTENT nonce="test">')
+  }
+})

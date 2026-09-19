@@ -137,3 +137,12 @@ describe('buildSnapshot', () => {
     expect(view.main).not.toContain('侧边栏内容')
   })
 })
+
+it('keeps rendered snapshots valid when the final cap intersects an emoji', () => {
+  document.body.innerHTML = '<main>' + '🌊'.repeat(100) + '</main>'
+  const view = buildSnapshot(new ElementIds(), { budget: BUDGET }, null)
+  const full = renderSnapshot(view, false)
+  const cut = full.indexOf('🌊') + 1
+  expect(cut).toBeGreaterThan(0)
+  expect(renderSnapshot(view, false, cut)).not.toMatch(/[\uD800-\uDFFF]/gu)
+})

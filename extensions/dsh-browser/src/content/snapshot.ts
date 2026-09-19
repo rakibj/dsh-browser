@@ -330,7 +330,10 @@ function sameForm(a: FormFieldView, b: FormFieldView): boolean {
 /** 渲染结果的整体预算：主文/清单之外的部分（标题、URL、包装行）也计入。 */
 function capRendered(text: string, budgetChars: number): string {
   if (text.length <= budgetChars) return text
-  return `${text.slice(0, budgetChars)}…(truncated to the snapshot character budget)`
+  let cut = text.slice(0, budgetChars)
+  const last = cut.charCodeAt(cut.length - 1)
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1)
+  return `${cut}…(truncated to the snapshot character budget)`
 }
 
 function renderItem(item: InventoryItem): string {

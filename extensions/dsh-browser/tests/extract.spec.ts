@@ -105,3 +105,8 @@ describe('mainText', () => {
     expect(text).not.toContain('导航垃圾')
   })
 })
+
+it('omits a whole emoji when the text budget lands inside its surrogate pair', () => {
+  expect(truncate('abc🌊tail', 4)).toEqual({ text: 'abc…', truncated: 6 })
+  expect(truncate('abc🌊tail', 5)).toEqual({ text: 'abc🌊…', truncated: 4 })
+})
