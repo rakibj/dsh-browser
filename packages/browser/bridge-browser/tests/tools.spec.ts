@@ -175,7 +175,7 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const byName = new Map(registered.map((entry) => [entry.name, entry.definition]))
-    for (const name of ['browser_click', 'browser_type', 'browser_press', 'browser_scroll', 'browser_get_text', 'browser_wait']) {
+    for (const name of ['browser_click', 'browser_click_at', 'browser_click_selector', 'browser_type', 'browser_press', 'browser_scroll', 'browser_get_text', 'browser_wait']) {
       const params = byName.get(name)!.parameters as { properties: { frame?: { type?: unknown } } }
       expect(params.properties.frame?.type).toBe('number')
     }

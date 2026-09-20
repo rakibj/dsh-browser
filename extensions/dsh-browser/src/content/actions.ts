@@ -172,6 +172,10 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       return snapshotAction(args, ctx)
     case 'browser_click':
       return clickAction(args, ctx)
+    case 'browser_click_at':
+      return clickAtAction(args, ctx)
+    case 'browser_click_selector':
+      return clickSelectorAction(args, ctx)
     case 'browser_type':
       return typeAction(args, ctx)
     case 'browser_press':
@@ -226,10 +230,58 @@ function withPageDelta(text: string, ctx: ActionContext): ActionResult {
 async function clickAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const index = numberArg(args, 'index')
   const el = elementOrThrow(ctx.ids, index)
+  return performClick(el, ctx, `[${index}]`)
+}
+
+/**
+ * Coordinate fallback for elements `browser_snapshot` does not enumerate:
+ * resolve the topmost element at a point (as reported in the snapshot's
+ * per-item `@(x, y)` coordinates, or picked adjacent to an enumerated item)
+ * and drive it through the same click dispatch as an indexed click.
+ */
+async function clickAtAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  const x = numberArg(args, 'x')
+  const y = numberArg(args, 'y')
+  const el = document.elementFromPoint(x, y)
+  if (el === null) {
+    throw new ActionError('action-failed', `No element found at (${x}, ${y}).`)
+  }
+  return performClick(el, ctx, `at (${x}, ${y})`)
+}
+
+/**
+ * Selector fallback for elements identifiable by their own markup (id, class,
+ * data attribute) without first reading a snapshot's index or coordinates —
+ * the gap coordinate-picking cannot cover, since it requires an `@(x, y)`
+ * already read off a snapshot.
+ */
+async function clickSelectorAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  const selector = typeof args.selector === 'string' ? args.selector : ''
+  if (selector === '') throw new ActionError('bad-args', 'selector must not be empty.')
+  let el: Element | null
+  try {
+    el = document.querySelector(selector)
+  } catch {
+    throw new ActionError('bad-args', `selector is not a valid CSS selector: ${selector}`)
+  }
+  if (el === null) {
+    throw new ActionError('action-failed', `No element matched selector: ${selector}`)
+  }
+  return performClick(el, ctx, `"${selector}"`)
+}
+
+/**
+ * Shared click dispatch for both index- and coordinate-addressed clicks:
+ * scroll into view, apply link/native-activation handling, and settle.
+ * @param el - resolved target element.
+ * @param ctx - action context (ids/budget/delta sharing).
+ * @param target - human-readable descriptor for the result text (e.g. `[3]` or `at (10, 20)`).
+ */
+async function performClick(el: Element, ctx: ActionContext, target: string): Promise<ActionResult> {
   el.scrollIntoView({ block: 'center', behavior: 'instant' })
   if (el instanceof HTMLAnchorElement) {
-    const target = el.target.trim().toLowerCase()
-    const sameFrameTarget = target === '' || target === '_self'
+    const linkTarget = el.target.trim().toLowerCase()
+    const sameFrameTarget = linkTarget === '' || linkTarget === '_self'
     let href: URL | undefined
     try { href = new URL(el.href) } catch { /* let the native click handle unusual links */ }
     const controlledNavigation = sameFrameTarget
@@ -249,7 +301,7 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
       if (requiresNativeActivation) {
         setTimeout(() => { el.click() }, 0)
         return {
-          text: `Clicked link [${index}] using native browser activation. Call browser_snapshot to read the resulting state.`,
+          text: `Clicked link ${target} using native browser activation. Call browser_snapshot to read the resulting state.`,
         }
       }
       // Dispatch the click handlers without its default navigation so a
@@ -261,7 +313,7 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
       }))
       if (!shouldNavigate) {
         await waitForPageSettled(ACTION_SETTLE)
-        return withPageDelta(`Clicked link [${index}].`, ctx)
+        return withPageDelta(`Clicked link ${target}.`, ctx)
       }
       const sameDocument = href.origin === location.origin
         && href.pathname === location.pathname
@@ -269,25 +321,25 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
       if (sameDocument) {
         if (href.hash !== location.hash) location.hash = href.hash
         await waitForPageSettled(ACTION_SETTLE)
-        return withPageDelta(`Clicked link [${index}].`, ctx)
+        return withPageDelta(`Clicked link ${target}.`, ctx)
       }
       // A cross-document navigation can unload this content script before an
       // awaited response. Answer first and navigate in the next task.
       setTimeout(() => { location.href = href.href }, 0)
       return {
-        text: `Clicked link [${index}]. Call browser_snapshot again after navigation settles.`,
+        text: `Clicked link ${target}. Call browser_snapshot again after navigation settles.`,
         navigationPending: true,
       }
     }
     setTimeout(() => { el.click() }, 0)
-    return { text: `Clicked link [${index}]. The link may open outside the controlled frame.` }
+    return { text: `Clicked link ${target}. The link may open outside the controlled frame.` }
   }
   if (el instanceof HTMLButtonElement && el.disabled) {
-    throw new ActionError('action-failed', `Button [${index}] is disabled.`)
+    throw new ActionError('action-failed', `Button ${target} is disabled.`)
   }
   ;(el as HTMLElement).click()
   await waitForPageSettled(ACTION_SETTLE)
-  return withPageDelta(`Clicked [${index}].`, ctx)
+  return withPageDelta(`Clicked ${target}.`, ctx)
 }
 
 /**

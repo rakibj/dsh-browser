@@ -10,6 +10,36 @@
  * @module
  */
 
+/**
+ * The full WAI-ARIA "widget" role taxonomy (interactive/leaf roles, not the
+ * composite containers that hold them — e.g. `option` but not `listbox`,
+ * `menuitem` but not `menu`). Listed exhaustively so a category of custom
+ * widget (any role in this set) is caught rather than one role at a time.
+ */
+const ARIA_WIDGET_ROLES = [
+  'button',
+  'checkbox',
+  'combobox',
+  'gridcell',
+  'link',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'option',
+  'progressbar',
+  'radio',
+  'scrollbar',
+  'searchbox',
+  'separator',
+  'slider',
+  'spinbutton',
+  'switch',
+  'tab',
+  'tabpanel',
+  'textbox',
+  'treeitem',
+]
+
 /** Every element type the model may be asked to operate on. */
 const INTERACTIVE_SELECTOR = [
   'a[href]',
@@ -17,15 +47,14 @@ const INTERACTIVE_SELECTOR = [
   'input:not([type="hidden"])',
   'select',
   'textarea',
-  '[role="button"]',
-  '[role="link"]',
-  '[role="checkbox"]',
-  '[role="radio"]',
-  '[role="tab"]',
-  '[role="menuitem"]',
   'summary',
   '[contenteditable="true"]',
   '[contenteditable=""]',
+  ...ARIA_WIDGET_ROLES.map((role) => `[role="${role}"]`),
+  // Custom widgets that aren't (yet) on the ARIA role list above still
+  // participate in keyboard/click interaction via one of these signals.
+  '[tabindex]',
+  '[onclick]',
 ].join(', ')
 
 /** Default cap on one item's rendered name/state text. */

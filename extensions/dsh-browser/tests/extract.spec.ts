@@ -75,6 +75,34 @@ describe('collectInteractive', () => {
   })
 })
 
+describe('collectInteractive: ARIA widget roles beyond the fixed whitelist', () => {
+  it('enumerates role="option" items inside an open listbox (Trello column-move dropdown)', () => {
+    document.body.innerHTML = `
+      <button aria-haspopup="listbox">Move to...</button>
+      <ul role="listbox">
+        <li role="option" tabindex="-1">To Do</li>
+        <li role="option" tabindex="-1">Doing</li>
+        <li role="option" tabindex="-1">Done</li>
+      </ul>
+    `
+    const elements = collectInteractive(document)
+    const names = elements.map((el) => el.textContent?.trim())
+    expect(names).toEqual(expect.arrayContaining(['To Do', 'Doing', 'Done']))
+  })
+
+  it('enumerates a different, untested ARIA widget role via the same heuristic (role="menuitemradio")', () => {
+    document.body.innerHTML = `
+      <div role="menu">
+        <div role="menuitemradio" tabindex="-1" aria-checked="false">Ascending</div>
+        <div role="menuitemradio" tabindex="-1" aria-checked="true">Descending</div>
+      </div>
+    `
+    const elements = collectInteractive(document)
+    const names = elements.map((el) => el.textContent?.trim())
+    expect(names).toEqual(expect.arrayContaining(['Ascending', 'Descending']))
+  })
+})
+
 describe('mainText', () => {
   it('prefers article content over the rest of the page', () => {
     document.body.innerHTML = `

@@ -105,6 +105,17 @@ describe('buildSnapshot', () => {
     expect(view.truncated.itemsDropped).toBe(15)
   })
 
+  it('exposes each item\'s center coordinates for the browser_click_at fallback', () => {
+    document.body.innerHTML = '<button>确认</button>'
+    const ids = new ElementIds()
+    const view = buildSnapshot(ids, { budget: BUDGET }, null)
+    expect(view.items).toHaveLength(1)
+    const [item] = view.items
+    expect(item).toMatchObject({ x: expect.any(Number), y: expect.any(Number) })
+    const text = renderSnapshot(view, false)
+    expect(text).toContain(`@(${item!.x}, ${item!.y})`)
+  })
+
   it('reuses the interactive scan for form fields and reports omitted fields', () => {
     document.body.innerHTML = Array.from({ length: 5 }, (_, i) => `<input aria-label="字段${i}">`).join('')
     const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect')

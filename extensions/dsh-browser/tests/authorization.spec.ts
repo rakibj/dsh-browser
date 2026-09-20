@@ -75,6 +75,26 @@ describe('approvalPromptForCall', () => {
     expect(prompt?.summary.length).toBeLessThan(70)
   })
 
+  it('requires approval for the coordinate click fallback, scoped like an indexed click', () => {
+    const prompt = approvalPromptForCall(call('browser_click_at', { x: 42, y: 17 }), 'auto', FRAMES, 'en')
+    expect(prompt).toMatchObject({
+      kind: 'action',
+      origins: ['https://app.example'],
+      canTrust: true,
+      summary: 'Click at (42, 17)',
+    })
+  })
+
+  it('requires approval for the selector click fallback, scoped like an indexed click', () => {
+    const prompt = approvalPromptForCall(call('browser_click_selector', { selector: '.column-doing' }), 'auto', FRAMES, 'en')
+    expect(prompt).toMatchObject({
+      kind: 'action',
+      origins: ['https://app.example'],
+      canTrust: true,
+      summary: 'Click ".column-doing"',
+    })
+  })
+
   it('keeps read-only viewport tools outside the approval path', () => {
     expect(approvalPromptForCall(call('browser_scroll', { direction: 'down' }), 'auto', FRAMES, 'zh')).toBeUndefined()
     expect(approvalPromptForCall(call('browser_wait'), 'auto', FRAMES, 'zh')).toBeUndefined()

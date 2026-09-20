@@ -50,6 +50,8 @@ export interface ContentBudget {
 const CONTENT_SCRIPT_FILE = 'content.js'
 const ACTION_DELTA_TOOLS = new Set([
   'browser_click',
+  'browser_click_at',
+  'browser_click_selector',
   'browser_type',
   'browser_press',
   'browser_scroll',
@@ -58,6 +60,8 @@ const ACTION_DELTA_TOOLS = new Set([
 const ACTION_DELTA_GUIDANCE = 'The page settled and its current changes are included below. Continue from this state; take another snapshot only when broader page context is needed.'
 const NAVIGATION_CANDIDATE_TOOLS = new Set([
   'browser_click',
+  'browser_click_at',
+  'browser_click_selector',
   'browser_navigate',
   'browser_back',
   'browser_forward',
@@ -73,6 +77,8 @@ const TAB_NATIVE_TOOLS = new Set([
 ])
 const STATE_CHANGING_PAGE_TOOLS = new Set([
   'browser_click',
+  'browser_click_at',
+  'browser_click_selector',
   'browser_type',
   'browser_press',
   'browser_scroll',

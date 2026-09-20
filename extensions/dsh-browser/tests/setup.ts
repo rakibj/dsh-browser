@@ -23,6 +23,13 @@ Object.defineProperty(Element.prototype, 'getBoundingClientRect', {
   },
 })
 
+Object.defineProperty(document, 'elementFromPoint', {
+  configurable: true,
+  value: function elementFromPoint(): Element | null {
+    return null
+  },
+})
+
 Object.defineProperty(globalThis, 'CSS', {
   configurable: true,
   value: {

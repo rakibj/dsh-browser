@@ -10,7 +10,7 @@
  * @module
  */
 
-import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
+import { accessibleName, collectInteractive, isVisible, mainText, pageText, truncate } from './extract.ts'
 import { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 
@@ -43,6 +43,9 @@ interface InventoryItem {
   selected?: boolean
   href?: string
   inViewport: boolean
+  /** Center-point coordinates, for browser_click_at when the item itself is unreachable by index. */
+  x: number
+  y: number
 }
 
 /** One numbered form field with its (masked) value. */
@@ -128,6 +131,22 @@ function ancestorsRendered(el: Element): boolean {
 }
 
 /**
+ * Center-point coordinates and viewport membership from a single rect read.
+ *
+ * `isInViewport` reads a fresh rect on every call; the snapshot needs both
+ * that check and the item's click-target coordinates per element, and a
+ * second rect read per element would double the layout cost this module
+ * already goes out of its way to pay once (see the caller's comment).
+ * @param el - element.
+ * @returns center coordinates (rounded) and whether it is in the viewport.
+ */
+function centerAndViewport(el: Element): { x: number; y: number; inViewport: boolean } {
+  const rect = el.getBoundingClientRect()
+  const inViewport = rect.bottom >= 0 && rect.top <= window.innerHeight && rect.right >= 0 && rect.left <= window.innerWidth
+  return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2), inViewport }
+}
+
+/**
  * Build a memoized "is this dialog open?" test.
  *
  * Openness depends only on the dialog, so the ancestor walk is evaluated once
@@ -187,11 +206,16 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   // Measure viewport and dialog membership once. Calling getBoundingClientRect
   // from a sort comparator forces repeated layout reads on large pages.
   const isOpenDialog = openDialogTest()
-  const elementViews = elements.map((element) => ({
-    element,
-    inViewport: isInViewport(element),
-    inDialog: openDialogOf(element, isOpenDialog) !== null,
-  }))
+  const elementViews = elements.map((element) => {
+    const { x, y, inViewport } = centerAndViewport(element)
+    return {
+      element,
+      inViewport,
+      x,
+      y,
+      inDialog: openDialogOf(element, isOpenDialog) !== null,
+    }
+  })
   const ordered = [...elementViews].sort((a, b) =>
     Number(b.inDialog) - Number(a.inDialog) || Number(b.inViewport) - Number(a.inViewport))
   const names = new Map<Element, string>()
@@ -205,7 +229,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   }
 
   const items: InventoryItem[] = []
-  for (const { element: el, inViewport } of ordered.slice(0, options.budget.maxItems)) {
+  for (const { element: el, inViewport, x, y } of ordered.slice(0, options.budget.maxItems)) {
     const index = ids.indexOf(el)
     if (index === undefined) continue
     const item: InventoryItem = {
@@ -213,6 +237,8 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
       role: roleOf(el),
       name: nameOf(el),
       inViewport,
+      x,
+      y,
     }
     if (el instanceof HTMLButtonElement && el.disabled) item.disabled = true
     if (el instanceof HTMLInputElement) {
@@ -312,6 +338,7 @@ function selectedText(select: HTMLSelectElement): string {
 function sameItem(a: InventoryItem, b: InventoryItem): boolean {
   return a.role === b.role && a.name === b.name && a.href === b.href
     && a.disabled === b.disabled && a.checked === b.checked && a.inViewport === b.inViewport
+    && a.x === b.x && a.y === b.y
 }
 
 function sameForm(a: FormFieldView, b: FormFieldView): boolean {
@@ -344,7 +371,7 @@ function renderItem(item: InventoryItem): string {
   ].filter((value) => value !== undefined).join('/')
   const stateText = state === '' ? '' : ` [${state}]`
   const hrefText = item.href !== undefined ? ` → ${item.href}` : ''
-  return `  [${item.index}] ${item.role} "${item.name}"${stateText}${hrefText}`
+  return `  [${item.index}] ${item.role} "${item.name}"${stateText}${hrefText} @(${item.x}, ${item.y})`
 }
 
 function renderForm(form: FormFieldView, includeIdentity: boolean): string {
